@@ -1,0 +1,253 @@
+%This code is designed to analysis selected repeated jump trials from vicon
+%3D files (.Enf), once files are selected the code will open each trial on
+%vicon, calculate contact time, jump height and reactive strength index of
+%each each jump from trial, then write the results into an excel file.
+%Authors - Yunus Kaghembe and Leigh James Ryan
+%Created 23/03/2021
+
+clear
+clc
+
+try
+    vicon= ViconNexus;
+catch
+    error = errordlg('Please ensure that Vicon is open before executing code', 'Unable to run code');
+    uiwait(error)
+    return
+end
+msg=msgbox("Select RJT trial with injured leg last to run code properly");    
+uiwait(msg)
+
+[Fname, Pname] = uigetfile('.Enf', 'Select RJT Files', 'MultiSelect', 'on');
+
+CF = contains(Fname, 'RJT');
+for p = 1:length(CF)
+    if CF(1,p) < 1
+        filecheck = msgbox('Please check Fname and ensure that correct RJT files are selected');
+        uiwait(filecheck)
+        return
+    end
+end
+
+if ischar(Fname)
+    y = 1;
+elseif ~ischar(Fname)
+    y = size(Fname, 2);
+end
+% Select injuried leg
+[injside,~] = listdlg('ListString', {'Left', 'Right'},'SelectionMode','single', 'PromptString', 'Select the injured side',...
+         'ListSize', [150,50], 'CancelString', 'Quit'); 
+
+
+for n = 1:y
+    %% Opening the right trial and getting the required information i.e. Bodymass etc...
+    if ischar(Fname)
+        answer = questdlg('Only one trial has been selected', 'Trials Selected', 'Continue' ,'Cancel', 'Cancel');
+        if strcmp(answer,'Cancel')
+            return
+        elseif strcmp(answer,'Continue')
+            idx = find(Fname == '.', 1, 'first');
+            Tname = Fname(1:idx-1);
+        end
+    elseif ~ischar(Fname)
+        x = Fname{1,n};
+        idx = find(x == '.', 1, 'first');
+        Tname = x(1:idx-1); %Name of Trial
+    end
+    
+    Trialpath = strcat(Pname, Tname); %Trial path
+    vicon.OpenTrial(Trialpath, 20); % opening trial
+    
+    %getting frames
+    [sFrame,eFrame] = vicon.GetTrialRegionOfInterest;
+    Fs = vicon.GetFrameRate; %Sampling Frequency
+    
+    %Get Subjects name
+    SubjectName = vicon.GetSubjectNames;
+    SubjectName = char (SubjectName(1,1)); %converting the subject name into a character
+    
+    %Getting Subject Parameters
+    SubjectParam = vicon.GetSubjectParamNames(SubjectName);
+    BM = vicon.GetSubjectParam(SubjectName,SubjectParam{1,1}); %Bodymass
+    BW = BM*9.81; %Bodyweight
+    %% importing analog force data
+    
+    %Device ID
+    ID = vicon.GetDeviceIDs;
+    DeviceID = cell(length(ID),1);
+    for x = 1:length(DeviceID)
+        DeviceID{x} = ID(x);
+    end
+    %Channels
+    Channels = {'Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz'};
+    
+    %Preallocating
+    %DeviceID = cell(length(DeviceName),1);
+    DeviceType = cell(length(DeviceID),1);
+    DeviceRate = cell(length(DeviceID),1);
+    DeviceOutputID = cell(length(DeviceID),1);
+    ChannelID = cell(length(Channels),1);
+    
+    for i = 1:length(DeviceID)
+        %DeviceID{i} = vicon.GetDeviceIDFromName(DeviceName{i});
+        [~,DeviceType{i}, DeviceRate{i}, DeviceOutputID{i}] = vicon.GetDeviceDetails(DeviceID{i});
+    end
+    
+    for i = 1:length(DeviceID)
+        if strcmp(DeviceType{i},'ForcePlate');
+            for j = 1:length(Channels)
+                ChannelID{j} = vicon.GetDeviceChannelIDFromName(DeviceID{i}, ceil(double(j)/3), Channels{j});
+                % 2nd term is Device OutputID (1 = force, 2 = moment, 3 = CoP)
+                ForcePlateRaw.DeviceID{i}.Channels{j} = vicon.GetDeviceChannel(DeviceID{i}, ceil(double(j)/3), ChannelID{j});
+                %ForcePlateCropped.DeviceID{i}.Channels{j} = ForcePlateRaw.DeviceID{i}.Channels{j}(sFrame*(DeviceRate{i}/Fs):eFrame*(DeviceRate{i}/Fs));
+            end
+        end
+    end
+    
+    Fz2 = ForcePlateRaw.DeviceID{1,1}.Channels{1,3} * -1;
+    Fz1 = ForcePlateRaw.DeviceID{1,2}.Channels{1,3} * -1;
+    
+    VerticalForce = Fz1 + Fz2; %Combine both forceplates as one forceplate
+    VerticalForce = VerticalForce';
+    %TrialForce{n} = VerticalForce;
+    
+    %donwsample forcedata into 200 Hz similar to kinematic data
+    VerticalForce = decimate(VerticalForce, 5);
+    VerticalForce = VerticalForce(sFrame:eFrame);
+    
+    %% Classifying Events
+    [FS, FO]= getevents(VerticalForce, BW);
+    k = 1:length(VerticalForce);
+    plot(VerticalForce)
+    title(Tname)
+    hold on
+    plot(k(FS), VerticalForce(FS),'x')
+    plot(k(FO), VerticalForce(FO),'o')
+    hold off
+    
+    pause;
+    close
+    %% Calculating Variables
+    [ContactTime, JumpHeight, RSI] = RJTanalysis(FS, FO);
+    
+    %% top five jumps
+    [jumps, index] = sort(RSI); %rearrange the jumps in order of lowest to highest RSI
+    newindex = index(:,end-4:end);
+    
+    for v = 1:5
+        jh = JumpHeight(:,newindex(v));
+        JH5(:,v) = jh;
+        
+        ct = ContactTime(:, newindex(v));
+        CT5(:,v) = ct;
+        
+        rsi = RSI(:, newindex(v));
+        RSI5(:,v) = rsi;
+    end
+    
+    
+    %mean of the 5 best jumps
+    
+    AveCT = round(mean(CT5),2);
+    AveJH = round(mean(JH5),2);
+    AveRSI = round(mean(RSI5),2);
+    
+   
+ 
+    
+    %% Writing Results into Excel file
+   
+    
+    header = {'JumpHeight (m)' 'Contact Time (s)' 'RSI'}';
+    header2 = {'Best 5'};
+    
+   for q = 1:length(JumpHeight);
+       NO = num2str(q);
+       hd = ['Jump ' NO];
+       header3(:,q) = {hd};
+   end 
+    
+   for a =1:5
+       hd2 = header3(:,newindex(:,a));
+    header4(:,a) = hd2; 
+   end 
+   
+   header5 = {'Average'};
+    
+    Data =[JumpHeight; ContactTime; RSI];
+    Data2 = [JH5; CT5; RSI5];
+    Data3 = [AveJH; AveCT; AveRSI];
+   
+   header6 = {'Injuried'};
+    
+    filename = strcat(SubjectName,'RJT');
+     if injside == 1 
+        xlswrite(filename,header6,"SLRJTLeft","A1")
+     else injside == 2 
+        xlswrite(filename,header6,"SLRJTRight","A1")
+     end
+   header7= {'LSI Values'}; 
+          
+         
+    
+    xlswrite(filename,header3,Tname,'B1')
+    xlswrite(filename,header,Tname,'A2')
+    xlswrite(filename,header2,Tname,'A7')
+    xlswrite(filename,header4,Tname,'B7')
+    xlswrite(filename,header,Tname,'A8')
+    xlswrite(filename,Data,Tname,'B2')
+    xlswrite(filename,Data2,Tname,'B8')
+    xlswrite(filename,header5,Tname,'H7')
+    xlswrite(filename,Data3,Tname,'H8')
+    
+    if injside==1
+    xlswrite(filename,header7,Tname,'I7')
+    else
+    xlswrite(filename,header7,Tname,'I7')
+    end
+   
+    
+
+      
+    if contains(Tname,"Left")== 1
+     cells2 = xlsread(filename,Tname,"H8:H10");
+      
+    elseif contains(Tname,"Right")== 1 
+     cells3 = xlsread(filename,Tname,"H8:H10");
+    
+    else
+       cells2 = xlsread(filename,Tname,"H8:H10");
+       cells3 = xlsread(filename,Tname,"H8:H10");
+     
+   
+    end 
+    
+    if injside==1 && contains(Tname,"Left")==1
+      LSI=(cells2./cells3)*100;
+      LSI1= round(LSI,2);
+      xlswrite(filename,LSI1,Tname,'I8')
+    elseif  injside==2 && contains(Tname,"Right")==1 
+      LSI=(cells3./cells2)*100;
+      LSI1= round(LSI,2);
+      xlswrite(filename,LSI1,Tname,'I8')
+    else
+    continue    
+    
+    end
+    
+    
+   
+    
+    end
+    
+   
+        
+   
+   
+   
+    
+    %stop loop if only one file is selected
+    if ischar(Fname)
+        return
+    end   
+    
